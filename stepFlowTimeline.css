@@ -31,7 +31,6 @@
  * --timeline-item-gap: 60px;
  * --timeline-item-content-gap: 20px;        (space between number and text)
  * --timeline-title-description-gap: 12px;    (space between item title and description)
- * --timeline-description-opacity: 0.8;
  * --timeline-description-margin-bottom: 1rem;
  * --timeline-inactive-item-opacity: 0.3;    (fadeInactiveItems: opacity of unreached item content)
  * --timeline-inactive-item-transition: 0.3s ease;
@@ -81,6 +80,12 @@ body.sqs-edit-mode-active [data-wm-plugin="step-flow-timeline"] .wm-plugin-conte
   gap: var(--timeline-gap, 2rem);
   align-items: start;
   width: 100%;
+}
+
+/* No section title/description/button: center the timeline in the section */
+[data-wm-plugin="step-flow-timeline"] .wm-step-flow-timeline-layout--no-intro {
+  grid-template-columns: minmax(0, var(--timeline-width, 58%));
+  justify-content: center;
 }
 
 /* ================================
