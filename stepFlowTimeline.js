@@ -355,7 +355,14 @@ class WMStepFlowTimeline {
     this.timeline.appendChild(track);
     this.timeline.appendChild(itemsList);
 
-    layout.appendChild(intro);
+    // When the intro has no content (no section title/description and no
+    // button), center the timeline in the section instead of leaving an
+    // empty left column.
+    if (intro.childElementCount === 0) {
+      layout.classList.add('wm-step-flow-timeline-layout--no-intro');
+    } else {
+      layout.appendChild(intro);
+    }
     layout.appendChild(this.timeline);
     contentWrapper.appendChild(layout);
     userItemsList.insertAdjacentElement('afterend', contentWrapper);
