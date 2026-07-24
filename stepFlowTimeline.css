@@ -178,10 +178,14 @@ body.sqs-edit-mode-active [data-wm-plugin="step-flow-timeline"] .wm-plugin-conte
   inset: 0;
   background: var(--timeline-fill-bg, var(--primaryButtonBackgroundColor, #000));
   border-radius: inherit;
-  transform: scaleY(0);
+  transform: scaleY(0) translateZ(0);
   transform-origin: top;
   transition: transform var(--timeline-progress-transition, 0.1s linear);
   z-index: 1;
+  /* Promote to a GPU compositing layer so Safari animates scaleY smoothly
+     instead of repainting the bar on every scroll frame. */
+  will-change: transform;
+  backface-visibility: hidden;
 }
 
 /* ================================
