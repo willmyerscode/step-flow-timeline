@@ -456,7 +456,7 @@ class WMStepFlowTimeline {
 
     const { firstDotTop, totalBarHeight } = this.recalculateTrack();
     if (totalBarHeight <= 0) {
-      this.progressFill.style.transform = 'scaleY(0)';
+      this.progressFill.style.transform = 'scaleY(0) translateZ(0)';
       return;
     }
 
@@ -466,7 +466,7 @@ class WMStepFlowTimeline {
     const scrollProgress = (scrollTrigger - timelineRect.top - firstDotTop) / totalBarHeight;
     const clampedProgress = Math.max(0, Math.min(1, scrollProgress));
 
-    this.progressFill.style.transform = `scaleY(${clampedProgress})`;
+    this.progressFill.style.transform = `scaleY(${clampedProgress}) translateZ(0)`;
 
     this.dots.forEach((dot, index) => {
       const title = this.items[index]?.querySelector('.wm-step-flow-timeline-item-title');
