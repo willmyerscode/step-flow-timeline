@@ -28,6 +28,13 @@ class WMStepFlowTimeline {
 
   static sectionTitleBlockSelector = 'p, h1, h2, h3, h4, h5, h6';
 
+  // Frames the scroll loop keeps running after the page stops moving.
+  static idleFrameLimit = 12;
+
+  // Height change (px) below which a touch-device resize is treated as the
+  // browser UI collapsing rather than a real viewport change.
+  static browserChromeHeightThreshold = 200;
+
   static resolveSectionDescriptionTag(tag) {
     const normalized = String(tag || 'p')
       .trim()
@@ -64,9 +71,30 @@ class WMStepFlowTimeline {
     this.progressTrack = null;
     this.items = [];
     this.dots = [];
+    this.metrics = null;
+    this.needsMeasure = true;
+    this.activeIndex = -1;
+    this.lastProgress = null;
+    this.viewportHeight = window.innerHeight;
+    this.lastViewportWidth = window.innerWidth;
+    this.lastScrollY = null;
+    this.idleFrames = 0;
+    this.rafId = null;
+    this.isVisible = true;
+    this.isTouch = window.matchMedia ? window.matchMedia('(hover: none)').matches : false;
+    // When the browser can run the fill off a scroll timeline (see the
+    // @supports block in the CSS), the compositor owns the bar and JS only
+    // has to keep the per-item active states in sync.
+    this.hasScrollTimeline = typeof CSS !== 'undefined'
+      && typeof CSS.supports === 'function'
+      && CSS.supports('animation-timeline', 'view()');
+    this.scrollTimelineChecked = false;
+    this.boundTick = null;
     this.boundHandleScroll = null;
     this.boundHandleResize = null;
+    this.boundHandleRemeasure = null;
     this.resizeObserver = null;
+    this.intersectionObserver = null;
     this.init();
   }
 
@@ -426,103 +454,226 @@ class WMStepFlowTimeline {
     return itemEl;
   }
 
-  recalculateTrack() {
+  /**
+   * Read every geometry value the scroll loop needs in one batch, then write the
+   * track position once. All layout reads belong here: measuring per item while
+   * scrolling forces a synchronous layout per item per frame, which is what made
+   * the progress bar stutter on mobile Safari.
+   */
+  measure() {
+    this.needsMeasure = false;
+
     if (!this.timeline || !this.progressTrack || this.dots.length === 0) {
-      return { firstDotTop: 0, totalBarHeight: 0 };
-    }
-
-    const timelineRect = this.timeline.getBoundingClientRect();
-    const firstTitle = this.items[0]?.querySelector('.wm-step-flow-timeline-item-title');
-    const lastTitle = this.items[this.items.length - 1]?.querySelector('.wm-step-flow-timeline-item-title');
-    const firstAnchor = firstTitle || this.dots[0];
-    const lastAnchor = lastTitle || this.dots[this.dots.length - 1];
-
-    const firstRect = firstAnchor.getBoundingClientRect();
-    const lastRect = lastAnchor.getBoundingClientRect();
-
-    // Align track to vertical centers of first/last title (or number)
-    const firstDotTop = firstRect.top - timelineRect.top + firstRect.height / 2;
-    const lastDotTop = lastRect.top - timelineRect.top + lastRect.height / 2;
-    const totalBarHeight = Math.max(0, lastDotTop - firstDotTop);
-
-    this.progressTrack.style.top = `${firstDotTop}px`;
-    this.progressTrack.style.height = `${totalBarHeight}px`;
-
-    return { firstDotTop, totalBarHeight };
-  }
-
-  updateProgress() {
-    if (!this.timeline || !this.progressFill || this.dots.length === 0) return;
-
-    const { firstDotTop, totalBarHeight } = this.recalculateTrack();
-    if (totalBarHeight <= 0) {
-      this.progressFill.style.transform = 'scaleY(0) translateZ(0)';
+      this.metrics = null;
       return;
     }
 
-    const timelineRect = this.timeline.getBoundingClientRect();
-    const viewportHeight = window.innerHeight;
-    const scrollTrigger = viewportHeight * 0.5;
-    const scrollProgress = (scrollTrigger - timelineRect.top - firstDotTop) / totalBarHeight;
-    const clampedProgress = Math.max(0, Math.min(1, scrollProgress));
-
-    this.progressFill.style.transform = `scaleY(${clampedProgress}) translateZ(0)`;
-
-    this.dots.forEach((dot, index) => {
-      const title = this.items[index]?.querySelector('.wm-step-flow-timeline-item-title');
-      const anchor = title || dot;
-      const anchorRect = anchor.getBoundingClientRect();
-      const anchorCenter = anchorRect.top - timelineRect.top + anchorRect.height / 2;
-      const dotProgress = (anchorCenter - firstDotTop) / totalBarHeight;
-
-      const isActive = clampedProgress >= dotProgress - 0.001;
-      dot.classList.toggle('wm-step-flow-timeline-dot--active', isActive);
-      this.items[index]?.classList.toggle('wm-step-flow-timeline-item--active', isActive);
+    // Read phase — no style writes until every rect has been collected.
+    const timelineTop = this.timeline.getBoundingClientRect().top;
+    const centers = this.items.map((item, index) => {
+      const anchor = item.querySelector('.wm-step-flow-timeline-item-title') || this.dots[index];
+      const rect = anchor.getBoundingClientRect();
+      return rect.top - timelineTop + rect.height / 2;
     });
+
+    // Align track to vertical centers of first/last title (or number)
+    const firstDotTop = centers[0];
+    const totalBarHeight = Math.max(0, centers[centers.length - 1] - firstDotTop);
+
+    // Write phase — the track is absolutely positioned, so this cannot move the
+    // anchors that were just measured.
+    this.progressTrack.style.top = `${firstDotTop}px`;
+    this.progressTrack.style.height = `${totalBarHeight}px`;
+
+    this.metrics = {
+      firstDotTop,
+      totalBarHeight,
+      // Progress value (0-1) at which each item becomes active.
+      thresholds: centers.map(center => (
+        totalBarHeight > 0 ? (center - firstDotTop) / totalBarHeight : 0
+      ))
+    };
+  }
+
+  /**
+   * The CSS scroll timeline is only useful if the browser actually resolved it.
+   * If it reports no current time the fill would sit frozen at scaleY(0), so
+   * fall back to driving the transform from here.
+   */
+  verifyScrollTimeline() {
+    if (this.scrollTimelineChecked) return;
+    if (!this.progressFill || typeof this.progressFill.getAnimations !== 'function') {
+      this.hasScrollTimeline = false;
+      this.scrollTimelineChecked = true;
+      return;
+    }
+
+    const isDriven = this.progressFill.getAnimations().some(animation => (
+      animation.timeline
+      && animation.timeline !== document.timeline
+      && animation.timeline.currentTime !== null
+    ));
+
+    this.scrollTimelineChecked = true;
+    if (!isDriven) {
+      this.hasScrollTimeline = false;
+      this.lastProgress = null;
+      // Switches the CSS back to the transition-based fill this class drives.
+      this.el.setAttribute('data-timeline-js-fill', 'true');
+    }
+  }
+
+  updateProgress() {
+    if (this.hasScrollTimeline) this.verifyScrollTimeline();
+    if (this.needsMeasure) this.measure();
+
+    const metrics = this.metrics;
+    if (!metrics || !this.progressFill) return;
+
+    let progress = 0;
+    if (metrics.totalBarHeight > 0) {
+      // The only layout read in the scroll path.
+      const timelineTop = this.timeline.getBoundingClientRect().top;
+      const scrollTrigger = this.viewportHeight * 0.5;
+      const scrollProgress = (scrollTrigger - timelineTop - metrics.firstDotTop) / metrics.totalBarHeight;
+      progress = Math.max(0, Math.min(1, scrollProgress));
+    }
+
+    if (progress !== this.lastProgress) {
+      this.lastProgress = progress;
+      if (!this.hasScrollTimeline) {
+        this.progressFill.style.transform = `scaleY(${progress}) translateZ(0)`;
+      }
+    }
+
+    // Thresholds ascend with the items, so the active item is the last one the
+    // fill has reached and everything above it is active too.
+    let activeIndex = 0;
+    for (let i = 1; i < metrics.thresholds.length; i += 1) {
+      if (progress < metrics.thresholds[i] - 0.001) break;
+      activeIndex = i;
+    }
+
+    if (activeIndex !== this.activeIndex) {
+      this.activeIndex = activeIndex;
+      this.items.forEach((item, index) => {
+        const isActive = index <= activeIndex;
+        item.classList.toggle('wm-step-flow-timeline-item--active', isActive);
+        this.dots[index]?.classList.toggle('wm-step-flow-timeline-dot--active', isActive);
+      });
+    }
+  }
+
+  /**
+   * Keep a short-lived rAF loop running while the page moves. Mobile Safari
+   * delivers scroll events unevenly during momentum scrolling, so updating
+   * straight off the event makes the fill advance in visible steps; a frame loop
+   * that idles out after the scroll settles keeps it on the display refresh.
+   */
+  requestTick() {
+    if (this.rafId !== null) return;
+    this.idleFrames = 0;
+    this.rafId = requestAnimationFrame(this.boundTick);
+  }
+
+  tick() {
+    this.rafId = null;
+
+    const scrollY = window.scrollY;
+    if (scrollY === this.lastScrollY) {
+      this.idleFrames += 1;
+    } else {
+      this.lastScrollY = scrollY;
+      this.idleFrames = 0;
+    }
+
+    this.updateProgress();
+
+    if (this.isVisible && this.idleFrames < WMStepFlowTimeline.idleFrameLimit) {
+      this.rafId = requestAnimationFrame(this.boundTick);
+    }
   }
 
   bindEvents() {
-    let ticking = false;
-    this.boundHandleScroll = () => {
-      if (ticking) return;
-      ticking = true;
-      requestAnimationFrame(() => {
-        this.updateProgress();
-        ticking = false;
-      });
+    this.boundTick = () => this.tick();
+    this.boundHandleScroll = () => this.requestTick();
+    this.boundHandleRemeasure = () => {
+      this.needsMeasure = true;
+      this.requestTick();
     };
 
     let resizeTimeout;
     this.boundHandleResize = () => {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      const widthChanged = width !== this.lastViewportWidth;
+
+      // Mobile Safari fires resize as the URL bar collapses and expands during a
+      // scroll. Adopting that height moves the trigger line mid-scroll and makes
+      // the fill jump, so keep the cached height for small height-only changes.
+      const isBrowserChrome = this.isTouch
+        && !widthChanged
+        && Math.abs(height - this.viewportHeight) < WMStepFlowTimeline.browserChromeHeightThreshold;
+
+      this.lastViewportWidth = width;
+      if (!isBrowserChrome) {
+        this.viewportHeight = height;
+        this.needsMeasure = true;
+      }
+      this.requestTick();
+
       clearTimeout(resizeTimeout);
-      resizeTimeout = setTimeout(() => this.updateProgress(), 100);
+      resizeTimeout = setTimeout(this.boundHandleRemeasure, 100);
     };
 
     window.addEventListener('scroll', this.boundHandleScroll, { passive: true });
     window.addEventListener('resize', this.boundHandleResize, { passive: true });
+    window.addEventListener('orientationchange', this.boundHandleRemeasure);
+    window.addEventListener('load', this.boundHandleRemeasure);
+    // Late-loading webfonts change title heights, which moves every anchor.
+    document.fonts?.ready.then(this.boundHandleRemeasure).catch(() => {});
 
     if (typeof ResizeObserver !== 'undefined' && this.timeline) {
-      this.resizeObserver = new ResizeObserver(() => this.updateProgress());
+      this.resizeObserver = new ResizeObserver(this.boundHandleRemeasure);
       this.resizeObserver.observe(this.timeline);
     }
 
+    if (typeof IntersectionObserver !== 'undefined' && this.timeline) {
+      this.intersectionObserver = new IntersectionObserver(entries => {
+        this.isVisible = entries.some(entry => entry.isIntersecting);
+        if (this.isVisible) this.requestTick();
+      }, { rootMargin: '20% 0px' });
+      this.intersectionObserver.observe(this.timeline);
+    }
+
     requestAnimationFrame(() => {
-      if (this.dots[0]) this.dots[0].classList.add('wm-step-flow-timeline-dot--active');
-      if (this.items[0]) this.items[0].classList.add('wm-step-flow-timeline-item--active');
+      this.needsMeasure = true;
       this.updateProgress();
     });
   }
 
   destroy() {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
     if (this.boundHandleScroll) {
       window.removeEventListener('scroll', this.boundHandleScroll);
     }
     if (this.boundHandleResize) {
       window.removeEventListener('resize', this.boundHandleResize);
     }
+    if (this.boundHandleRemeasure) {
+      window.removeEventListener('orientationchange', this.boundHandleRemeasure);
+      window.removeEventListener('load', this.boundHandleRemeasure);
+    }
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
       this.resizeObserver = null;
+    }
+    if (this.intersectionObserver) {
+      this.intersectionObserver.disconnect();
+      this.intersectionObserver = null;
     }
 
     const customContent = this.el.querySelector('.wm-plugin-content');
@@ -535,11 +686,16 @@ class WMStepFlowTimeline {
 
     this.el.removeAttribute('data-wm-plugin');
     this.el.removeAttribute('data-timeline-fade-inactive');
+    this.el.removeAttribute('data-timeline-js-fill');
     this.timeline = null;
     this.progressFill = null;
     this.progressTrack = null;
     this.items = [];
     this.dots = [];
+    this.metrics = null;
+    this.needsMeasure = true;
+    this.activeIndex = -1;
+    this.lastProgress = null;
 
     WMStepFlowTimeline.emitEvent(':destroy', { el: this.el }, this.el);
   }

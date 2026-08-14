@@ -158,7 +158,9 @@ body.sqs-edit-mode-active [data-wm-plugin="step-flow-timeline"] .wm-plugin-conte
   left: calc(var(--timeline-dot-size, 40px) / 2);
   width: var(--timeline-track-width, 4px);
   border-radius: 999px;
-  overflow: hidden;
+  /* No overflow clipping: the fill only ever scales down from the top, so it
+     stays inside the track. Clipping a composited, animating child costs Safari
+     a repaint of the rail on every scroll frame. */
   z-index: 0;
   pointer-events: none;
   transform: translateX(-50%);
@@ -186,6 +188,40 @@ body.sqs-edit-mode-active [data-wm-plugin="step-flow-timeline"] .wm-plugin-conte
      instead of repainting the bar on every scroll frame. */
   will-change: transform;
   backface-visibility: hidden;
+}
+
+/* Where the browser supports scroll-driven animations (Safari 26+, Chrome 115+),
+   hand the fill to the compositor instead of updating it from a scroll handler.
+   Safari does not run JS at the display refresh rate during momentum scrolling,
+   so a JS-driven bar always advances in steps there; a scroll timeline animates
+   off the main thread and tracks the finger exactly.
+
+   Insetting the view timeline by 50% top and bottom collapses the scrollport to
+   a line at the middle of the viewport, so the animation runs from "track top
+   crosses the midline" to "track bottom crosses the midline" — the same mapping
+   the JS fallback computes. */
+@supports (animation-timeline: view()) {
+  [data-wm-plugin="step-flow-timeline"]:not([data-timeline-js-fill]) .wm-step-flow-timeline-track {
+    view-timeline-name: --wm-step-flow-timeline-track;
+    /* 1px shy of a full 50/50 inset: a scrollport collapsed to exactly zero is
+       a degenerate case, and the 1px of slack costs nothing visually. */
+    view-timeline-inset: calc(50% - 1px) calc(50% - 1px);
+  }
+
+  [data-wm-plugin="step-flow-timeline"]:not([data-timeline-js-fill]) .wm-step-flow-timeline-fill {
+    transition: none;
+    animation-name: wm-step-flow-timeline-fill;
+    animation-duration: auto;
+    animation-timing-function: linear;
+    animation-fill-mode: both;
+    animation-timeline: --wm-step-flow-timeline-track;
+    animation-range: cover;
+  }
+
+  @keyframes wm-step-flow-timeline-fill {
+    from { transform: scaleY(0) translateZ(0); }
+    to { transform: scaleY(1) translateZ(0); }
+  }
 }
 
 /* ================================
