@@ -323,7 +323,6 @@ body.sqs-edit-mode-active [data-wm-plugin="step-flow-timeline"] .wm-plugin-conte
 
 [data-wm-plugin="step-flow-timeline"] .wm-step-flow-timeline-item-title {
   margin: 0;
-  font-weight: 600;
   color: var(--timeline-title-color, var(--list-section-simple-title-color, inherit));
   line-height: 1.2;
 }
